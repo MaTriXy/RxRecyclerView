@@ -27,11 +27,14 @@ package com.exallium.rxrecyclerview.lib;
 import android.support.v7.widget.RecyclerView;
 import android.util.Log;
 import com.exallium.rxrecyclerview.lib.element.EventElement;
+import com.exallium.rxrecyclerview.lib.event.Event;
 import rx.Observable;
 import rx.Subscriber;
 import rx.android.schedulers.AndroidSchedulers;
 
 import java.util.TreeSet;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * Reactive View Adapter for RecyclerView
@@ -49,6 +52,8 @@ import java.util.TreeSet;
 public abstract class RxRecyclerViewAdapter<K, V, VH extends RecyclerView.ViewHolder> extends RecyclerView.Adapter<VH> {
 
     private static final String TAG = RxRecyclerViewAdapter.class.getSimpleName();
+
+    private final Map<K, EventElement<K, V>> items = new HashMap<>();
 
     private final TreeSet<EventElement<K, V>> treeSet;
 
@@ -81,19 +86,41 @@ public abstract class RxRecyclerViewAdapter<K, V, VH extends RecyclerView.ViewHo
     public abstract void onBindViewHolder(VH holder, EventElement<K, V> element);
 
     @Override
-    public int getItemCount() {
+    public final int getItemCount() {
         return treeSet.size();
     }
 
     @Override
-    public int getItemViewType(int position) {
+    public final int getItemViewType(int position) {
         return getItemAt(position).getViewType();
     }
 
     // TODO: Performance
-    protected EventElement<K, V> getItemAt(int position) {
+    protected final EventElement<K, V> getItemAt(int position) {
         return (EventElement<K, V>) treeSet.toArray()[position];
     }
+
+    /**
+     * @param element The element to find
+     * @return -1 if the item does not exist in the set, otherwise the element's index
+     */
+    protected final int getIndexOf(EventElement<K, V> element) {
+        return treeSet.contains(element) ? treeSet.headSet(element).size() : -1;
+    }
+
+    /**
+     * Happens before an item is Added or Removed from the list. At this point, you can
+     * get the original item via use of getItemAt and getIndexOf.
+     * @param element The element we are adding or removing
+     */
+    protected void preProcessElement(EventElement<K, V> element) { }
+
+    /**
+     * Happens after an item is Added or Removed from the list.  At this point the original
+     * item is no longer available.
+     * @param element The element we added or removed
+     */
+    protected void postProcessElement(EventElement<K, V> element) { }
 
     private class RxSubscriber extends Subscriber<EventElement<K, V>> {
 
@@ -109,21 +136,54 @@ public abstract class RxRecyclerViewAdapter<K, V, VH extends RecyclerView.ViewHo
 
         @Override
         public void onNext(EventElement<K, V> rxEvent) {
-            switch (rxEvent.getData().getType()) {
-                case ADD:
-                    if (treeSet.add(rxEvent)) {
-                        notifyItemInserted(treeSet.headSet(rxEvent).size());
-                    } else {
-                        notifyItemChanged(treeSet.headSet(rxEvent).size());
-                    }
-                    break;
-                case REMOVE:
-                    int index = treeSet.headSet(rxEvent).size();
-                    if (treeSet.remove(rxEvent)) {
-                        notifyItemRemoved(index);
-                    }
-                    break;
+            preProcessElement(rxEvent);
+
+            int eventType = rxEvent.getViewType() >> EventElement.MASK_SHIFT;
+            if (eventType == EventElement.HEADER_MASK || eventType == EventElement.FOOTER_MASK) {
+                switch (rxEvent.getData().getType()) {
+                    case ADD:
+                        treeSet.add(rxEvent);
+                        notifyItemInserted(getIndexOf(rxEvent));
+                        break;
+                    case REMOVE:
+                        int pos = getIndexOf(rxEvent);
+                        if (pos != -1) {
+                            treeSet.remove(rxEvent);
+                            notifyItemRemoved(pos);
+                        }
+                        break;
+                }
+            } else {
+                EventElement<K, V> currentRxEvent;
+                switch (rxEvent.getData().getType()) {
+                    case ADD:
+                        if ((currentRxEvent = items.put(rxEvent.getData().getKey(), rxEvent)) != null) {
+                            final int orgPos = getIndexOf(currentRxEvent);
+                            treeSet.remove(currentRxEvent);
+                            treeSet.add(rxEvent);
+                            final int newPos = getIndexOf(rxEvent);
+                            if (orgPos != newPos) {
+                                notifyItemMoved(orgPos, newPos);
+                            }
+                            notifyItemChanged(newPos);
+                        }
+                        else {
+                            treeSet.add(rxEvent);
+                            notifyItemInserted(getIndexOf(rxEvent));
+                        }
+                        break;
+                    case REMOVE:
+                        currentRxEvent = items.remove(rxEvent.getData().getKey());
+                        if (currentRxEvent != null) {
+                            int index = getIndexOf(currentRxEvent);
+                            if (treeSet.remove(currentRxEvent)) {
+                                notifyItemRemoved(index);
+                            }
+                        }
+                        break;
+                }
             }
+            postProcessElement(rxEvent);
         }
     }
 }
